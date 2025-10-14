@@ -1,0 +1,17 @@
+services:
+  tts:
+    image: tts-uv-image
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./code:/app/code           # Mount your local Python code
+      - ./output:/app/output       # Persist generated MP3/audio
+      - ./service-account.json:/app/service-account.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
+    working_dir: /app/code
+    ports:
+      - "8080:8080"               # If you run a server later
+    command: >
+      sh -c "while true; do python main.py; sleep 2; done"
