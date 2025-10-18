@@ -2,6 +2,7 @@ from google import genai
 from pydantic import BaseModel
 from typing import List, Literal
 import json
+import os
 
 # --- Pydantic schema ---
 class ContentBlock(BaseModel):
@@ -29,6 +30,15 @@ class Article(BaseModel):
 
 def get_json(content: str) -> tuple[str, dict]:
     
+    # output_filename = "output.json"
+    # if os.path.exists(output_filename):
+    #     with open(output_filename, 'r') as f:
+    #         json_data = json.load(f)
+    #         article_id = json_data.get('id')
+    #         if article_id:
+    #             print(f"Loaded from existing file: {output_filename}")
+    #             return (article_id, json_data)
+
     # --- Gemini setup ---
     client = genai.Client()
 
@@ -72,7 +82,12 @@ def get_json(content: str) -> tuple[str, dict]:
     
     json_data = article.model_dump()
     article_id = json_data['id']
-    with open(f"{article_id}-output.json", "w") as f:
+    
+    # Note: The user requested to use a fixed "output.json" file.
+    # For multiple articles, you might want to use a dynamic filename like:
+    output_filename = f"{article_id}-output.json"
+    
+    with open(output_filename, "w") as f:
         json.dump(json_data, f, ensure_ascii=False, indent=2)
         
     return (article_id, json_data)

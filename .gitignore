@@ -12,5 +12,5 @@ process.log
 .env
 
 
-.mp3
-.json
+*.mp3
+*.json

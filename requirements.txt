@@ -3,3 +3,6 @@ uvicorn
 google-cloud-texttospeech
 uvloop
 tqdm
+python-telegram-bot
+httpx
+python-dotenv

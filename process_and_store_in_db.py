@@ -231,6 +231,7 @@ class ProcessData:
             return None, None
     
     def upload_article_from_content(self, raw_text: str, upload: bool = True, json_data: dict = {})-> dict:
+        base_url = "https://jesse-anand-articles.netlify.app/article/"
         steps = [
             "Generate Json From Data",
             "Upload Article" if upload else "",
@@ -264,7 +265,9 @@ class ProcessData:
                 return {
                         "status": "success",
                         "message": "Article uploaded successfully with audio",
+                        "url": f"English: \n\n {base_url}{article_id}?la=tamil \n\n Tamil: \n{base_url}{article_id}?la=english",
                         "data": {
+                            
                             "article_id": article_id,
                             "json_data": json_data,
                             "audio": {
