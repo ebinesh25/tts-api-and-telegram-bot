@@ -4,15 +4,26 @@ from supabase.client import ClientOptions
 from convert_to_speech import TTSHandler
 from text_to_json import get_json
 from dotenv import load_dotenv
+import json
 
 
 load_dotenv()
+import logging
+from tqdm import tqdm
+
+# Configure logging to file
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+file_handler = logging.FileHandler("process.log")
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 class SupabaseManager:
     def __init__(self):
         url: str = os.environ.get("SUPABASE_URL")
         key: str = os.environ.get("SUPABASE_SERVICE_KEY")
-        self.db = 'articles'
+        self.db = 'articles_duplicate'
         # self.db = 'articles_duplicate'
         self.supabase: Client = create_client(
             url,
@@ -79,12 +90,38 @@ class SupabaseManager:
             print(f"Error uploading file: {e}")
             return None
 
+    def get_audio_file_url(self, file_name: str, bucket_name: str = "blog_audio"):
+        """
+        Gets the public URL of an audio file if it exists in Supabase Storage.
+        Args:
+            file_name (str): Name of the audio file.
+            bucket_name (str): Name of the Supabase Storage bucket.
+        Returns:
+            str: Public URL of the file, or None if it doesn't exist.
+        """
+        try:
+            # List files in the 'audio' folder of the bucket
+            files = self.supabase.storage.from_(bucket_name).list(path="audio")
+            
+            # Check if the file exists in the list
+            file_exists = any(file['name'] == file_name for file in files)
+            
+            if file_exists:
+                public_url = self.supabase.storage.from_(bucket_name).get_public_url(f"audio/{file_name}")
+                return public_url
+            else:
+                return None
+        except Exception as e:
+            print(f"Error checking for file: {e}")
+            return None
+
 class ProcessData:
     def __init__(self, manager: SupabaseManager, tts: TTSHandler):
         self.manager = manager
         self.tts = tts
         
     def parse_content(self, article_id: str)-> tuple[str, str]:
+        logger.info(f"Parsing content for article_id: {article_id}")
         try:
             json_data = self.manager.get_article(article_id)    
             if not json_data.data:
@@ -104,7 +141,7 @@ class ProcessData:
             
             return (tamil_text, english_text)
         except Exception as e:
-            print(e)
+            logger.error(f"Error parsing content for article {article_id}: {e}")
             return None, None
         
     def get_all_articles(self):
@@ -113,75 +150,130 @@ class ProcessData:
         return ids
     
     def convet_to_speech_and_upload(self, article_id: str):
-        """_summary_
+        """
+        Process text to speech conversion and upload for a given article.
 
         Args:
-            article_id (str): _description_
+            article_id (str): Identifier of the article to process.
 
         Returns:
-            tamil_url, english_url
-        
-        Parse the text 
-        Converts to audio file
-        Upload to supabase storage. 
-        Update the article with the urls. 
-        Return the urls
+            tuple: (tamil_url, english_url) on success, (None, None) on failure.
         """
+        # Define processing steps for progress bar
+        steps = [
+            "Parsing content",
+            "Generating Tamil audio",
+            "Generating English audio",
+            "Uploading Tamil audio",
+            "Uploading English audio",
+            "Updating database"
+        ]
+        pbar = tqdm(total=len(steps), desc=f"Processing article {article_id}", unit="step")
         try:
-            tamil_text, english_text = self.parse_content(article_id)
-            
+            # Prepare file paths
             tamil_file_path = f"{article_id}_tamil.mp3"
             english_file_path = f"{article_id}_english.mp3"
             
+            # Check if files already exist in storage
+            tamil_url = self.manager.get_audio_file_url(os.path.basename(tamil_file_path))
+            english_url = self.manager.get_audio_file_url(os.path.basename(english_file_path))
+
+            if tamil_url and english_url:
+                logger.info(f"Audio files for article {article_id} already exist. Skipping generation and upload.")
+                # Update the database with the existing URLs
+                json_data = {"audio": {"tamil": tamil_url, "english": english_url}}
+                self.manager.update_article(article_id, json_data)
+                logger.info(f"Updated article {article_id} with existing audio URLs")
+                return tamil_url, english_url
+            
+            # Step 1: Parse content
+            pbar.set_description("Parsing content")
+            tamil_text, english_text = self.parse_content(article_id)
+            pbar.update(1)
+
+
+            # Step 2: Generate Tamil audio
+            pbar.set_description("Generating Tamil audio")
             self.tts.text_to_speech_file(tamil_text, tamil_file_path, language_code="ta-IN")
+            logger.info(f"Generated Tamil audio file: {tamil_file_path}")
+            pbar.update(1)
+
+            # Step 3: Generate English audio
+            pbar.set_description("Generating English audio")
             self.tts.text_to_speech_file(english_text, english_file_path, language_code="en-IN")
-            
+            logger.info(f"Generated English audio file: {english_file_path}")
+            pbar.update(1)
+
+            # Step 4: Upload Tamil audio
+            pbar.set_description("Uploading Tamil audio")
             tamil_url = self.manager.upload_audio_file(tamil_file_path)
+            logger.info(f"Uploaded Tamil audio for {article_id}: {tamil_url}")
+            pbar.update(1)
+
+            # Step 5: Upload English audio
+            pbar.set_description("Uploading English audio")
             english_url = self.manager.upload_audio_file(english_file_path)
-            
-            json_data = {
-                "audio": {
-                    "tamil": tamil_url,
-                    "english": english_url
-                }
-            }
-            
+            logger.info(f"Uploaded English audio for {article_id}: {english_url}")
+            pbar.update(1)
+
+            # Step 6: Update database
+            pbar.set_description("Updating database")
+            json_data = {"audio": {"tamil": tamil_url, "english": english_url}}
             self.manager.update_article(article_id, json_data)
-            
+            logger.info(f"Updated article {article_id} with audio URLs")
+            pbar.update(1)
+
+            pbar.close()
             return tamil_url, english_url
         except Exception as e:
-            print(e)
+            pbar.close()
+            logger.error(f"Error in TTS conversion and upload for article {article_id}: {e}")
             return None, None
     
-    def upload_article_from_content(self, raw_text: str, upload: bool = True, gen_audio: bool = True, json_data: dict = {})-> dict:
+    def upload_article_from_content(self, raw_text: str, upload: bool = True, json_data: dict = {})-> dict:
+        steps = [
+            "Generate Json From Data",
+            "Upload Article" if upload else "",
+            "Upload Audio" if upload else ""
+        ]
+        pbar = tqdm(total=len(steps), desc=f"Processing article", unit="step")
         try: 
-            article_json = get_json(raw_text)
-            article_id  = article_json.id
+            
+            # Step 1: Convert content to json
+            pbar.set_description("Generate Json From Data")
+            article_id, json_data = get_json(raw_text)
+            
+            pbar.update(1)
+            
             
             if upload:
-                self.manager.insert_article(json_data)
-                return {
-                    "status": "success",
-                    "message": "Article uploaded successfully",
-                    "data": {
-                        "article_id": article_id,
-                        "json_data": json_data
-                    }
-                }
-            if gen_audio and upload:
+                # Step 2: Upload article
+                pbar.set_description("Upload Article")
+                existing_article = self.manager.get_article(article_id)
+                if existing_article and existing_article.data:
+                    logger.info(f"Article with id {article_id} already exists. Skipping insertion.")
+                else:
+                    self.manager.insert_article(json_data)
+                pbar.update(1)
+                
+                
+                pbar.set_description("Upload Audio")
                 tamil_url, english_url = self.convet_to_speech_and_upload(article_id)
+                pbar.update(1)
+                
                 return {
-                    "status": "success",
-                    "message": "Article uploaded successfully with audio",
-                    "data": {
-                        "article_id": article_id,
-                        "json_data": json_data,
-                        "audio": {
-                            "tamil": tamil_url,
-                            "english": english_url
+                        "status": "success",
+                        "message": "Article uploaded successfully with audio",
+                        "data": {
+                            "article_id": article_id,
+                            "json_data": json_data,
+                            "audio": {
+                                "tamil": tamil_url,
+                                "english": english_url
+                            }
                         }
                     }
-                }
+               
             return {
                 "status": "success",
                 "message": "Article transformed to json",
@@ -206,25 +298,26 @@ if __name__ == "__main__":
     # print(manager.get_article('jealousy-and-envy'))
     
     """Upload from raw_text"""
-    raw_text = """
-    Be watchful
-    Humans have desires because they were created by God to have them, with the intention that these desires would be focused on Him. We all know how Satan tempted Adam & Eve in Genesis! Eve's desire for the fruit came from her perception that it was "good for food," "pleasing to the eye," and "desirable for gaining wisdom." The serpent deceives Eve by twisting God's words, creating doubt, and making the fruit appear desirable for its promise of wisdom. We know what happens in the end. We see the tactics he used, and still he uses us too. As we read in 1 Peter 5:8, Be alert and of a sober mind. Your enemy the devil prowls around like a roaring lion looking for someone to devour." We have to be watchful; sin starts with our desire. Recently I realize that the battle is often won or lost in the mind.  When a thought arises that could lead to sin,Today I encourage everyone to dismiss it before it can lead to a sinful act. There are some cases where we react not even thinking before, because we used to, and Satan knows how to trigger us. To overcome this focus on Jesus rather than dwelling on the sin, hold on to your personal quiet time with God daily. My life was going well, but I wasn't happy. Once I was reading this passage, I understood that focusing on what is lacking is also a sin that makes us unhappy.  Eve made that mistake; she isn't satisfied with what God has given. She desired more; that made her fall. That's true, I started to see more on what I don't have instead of seeing what I have . Today I would like to remind myself and everyone God created us not by mistake; he knows what we should have, so we need to accept  and start to live the life that he has given.Not all your desires and needs are wrong,Sometimes it might be a natural, God-given desire also, so instead of we  chasing our desires, let's bring to God ,he will bless our desires .Start to focus on what he has given; believe that he knows and cares for us more than we do for  ourselves.Reflection: Examine yourselves. How conscious are you of sin? How often do you pray about sin?
+    with open('raw_text.txt', 'r') as f:
+        raw_text = f.read()
     
-    கவனமாக இருங்கள்!
-    மனிதர்கள்  ஆசைகள்  கொண்டிருப்பது , தேவனால் உருவாக்கப்பட்டது, ஏனென்றால் இந்த ஆசைகள் அவரை மையமாகக் கொண்டிருக்கும் நோக்கத்துக்காக . ஆதியாகமத்தில் ஆதாமையும் ஏவாளையும் சாத்தான் எவ்வாறு சோதித்தான் என்பதை நாம் அனைவரும் அறிவோம்! ஏவாளின் பழத்தின் மீதான ஆசை, அது "உணவுக்கு நல்லது", "கண்ணுக்குப் பிரியமானது" மற்றும் "ஞானத்தைப் பெற விரும்பத்தக்கது" என்ற அவளுடைய பார்வையிலிருந்து வந்தது. சர்ப்பம் கடவுளின் வார்த்தைகளைத் திரித்து, சந்தேகத்தை உருவாக்கி, அதன் ஞான வாக்குறுதிக்காக பழத்தை விரும்பத்தக்கதாகக் காட்டுவதன் மூலம் ஏவாளை ஏமாற்றுகிறது. இறுதியில் என்ன நடக்கிறது என்பது நமக்குத் தெரியும். அவன் தந்திரங்களை ஆதாம் ஏவாள் முதற்கொண்டு நம்மிடமும் பயன்படுத்திக் கொண்டு இருக்கிறான் இன்று வரை.
- 1 பேதுரு 5 அதிகாரம் 8-ல் நாம் படிக்கும்போது,
- தெளிந்த புத்தியுள்ளவர்களாயிருங்கள், விழித்திருங்கள்; ஏனெனில், உங்கள் எதிராளியாகிய பிசாசானவன் கெர்ச்சிக்கிற சிங்கம்போல் எவனை விழுங்கலாமோ என்று வகைதேடிச் சுற்றித்திரிகிறான்.
-  நாம் விழிப்புடன் இருக்க வேண்டும்; பாவம் நம் ஆசையிலிருந்து தொடங்குகிறது.  இந்த ஆசை போராட்டம்   மனதில் தொடங்கி, வெற்றியோ தோல்வியோ என்று முடிவு செய்கிறது .  இன்று,  பாவச் செயலுக்கு வழிவகுக்கும் முன், அதை நாம் நிராகரிக்குமாறு அனைவரையும் நான் ஊக்குவிக்கிறேன். சில சமயங்களில்  சிந்திக்காமல் எதிர்வினையாற்றும்  சந்தர்ப்பங்கள் உள்ளன, காரணம் அதற்கு நாம் பழக்கப்பட்டு இருப்போம் , மேலும் சாத்தான் நம்மை எப்படித் தூண்டுவது என்று அறிந்திருக்கிறான். இதிலிருந்து மீண்டுக் கொள்ள பாவத்தில் கவனம் செலுத்துவதற்குப் பதிலாக இயேசுவின் மீது கவனம் செலுத்துவோம் , தினமும் கடவுளுடன்  தனிப்பட்ட  நேரத்தைப் தவறாமல் பிடித்துக் கொள்வோம் . எல்லாம் நன்றாக போய்க் கொண்டிருந்தது ஆனால் நான் மகிழ்ச்சியாக இல்லை,இந்தப் பகுதியைப் படித்த போது தெரிந்து கொண்டேன், இல்லாதவற்றில் கவனம் செலுத்துவதும் நம்மை மகிழ்ச்சியற்றவர்களாக மாற்றும், அது பாவம் என்பதை நான் புரிந்துகொண்டேன். ஏவாள் அந்தத் தவறைச் செய்தாள்; கடவுள் கொடுத்ததில் அவள் திருப்தி அடையவில்லை. அவள் அதிகமாக விரும்பினாள்; அது அவளை வீழ்ச்சியடையச் செய்தது. ஏவாளை போல நானும்  தேவன்  எனக்கு என்ன கொடுத்திருக்கிறார்  பார்ப்பதற்குப் பதிலாக, என்னிடம் இல்லாதவற்றில் கவனம் செலுத்தி வந்தேன்; என் ஆசைகள் என்னைப் கைதியாக்கியது, அதிலிருந்து விடு பெற இந்த புரிதலை  நம்ப வேண்டும் என்று கற்றுக்கொண்டேன் , நமக்கு என்ன வேண்டும் என்று அவருக்குத் தெரியும், எனவே அவர் கொடுத்த வாழ்க்கையை நாம் அதனுடன் வாழ பழகிக் கொள்ள வேண்டும் என்று. நமக்கு சில தேவைகள் அல்லது ஆசைகள் இருக்கலாம்; எல்லாம் தவறாக இருக்காது. சில நேரங்களில் அது இயற்கையானது, தேவன் கொடுத்த விருப்பமாகவும் கூட இருக்கலாம், எனவே ஆசைகளைத் பின் நாம்  துரத்துவதற்குப் பதிலாக, ஆசைகளை தேவனிடம் கொண்டு வாருங்கள்; அது நம் வாழ்க்கைக்கு சிறந்த தீர்வாக இருக்கும். அவர் நம்மை  வழிநடத்துவார். அவர் கொடுத்தவற்றில் கவனம் செலுத்தத் தொடங்குங்கள்; அவர் நம்மை விட நம்மை அறிந்திருக்கிறார், அக்கறை காட்டுகிறார் என்பது நம்புங்கள். பிரதிபலிப்பு: உங்களை நீங்களே ஆராய்ந்து பாருங்கள். பாவத்தைப் பற்றி நீங்கள் எவ்வளவு உணர்வுள்ளவராக இருக்கிறீர்கள்? பாவத்தைப் பற்றி நீங்கள் எத்தனை முறை ஜெபிக்கிறீர்கள்?
-    """
-    resp = pd.upload_article_from_content(raw_text, upload=True, gen_audio=True)
-    print(resp)
+    pd.upload_article_from_content(raw_text)
     
-    """Get content and upload"""
-    tamil_url, english_url = pd.convet_to_speech_and_upload('jealousy-and-envy')
-    print(tamil_url)
-    print(english_url)
+    # article_id, article_json = get_json(raw_text)
     
-    """Get the content"""
+    # with open(f'{article_id}-output.json', 'r') as f:
+    #     article_json = json.load(f)
+    
+    # """Upload from json"""
+    # resp = manager.insert_article(article_json)
+    # print(resp)
+  
+    # """Get content and upload"""
+    # tamil_url, english_url = pd.convet_to_speech_and_upload(article_id)
+    # print(tamil_url)
+    # print(english_url)
+    
+    # """Get the content"""
     # tamil_text, english_text = pd.parse_content('jealousy-and-envy')
     # print(english_text)
     # print(tamil_text)

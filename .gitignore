@@ -5,7 +5,12 @@ build/
 dist/
 wheels/
 *.egg-info
+process.log
 
 # Virtual environments
 .venv
 .env
+
+
+.mp3
+.json
