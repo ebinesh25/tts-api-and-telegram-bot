@@ -8,7 +8,7 @@ from process_and_store_in_db import *
 
 
 # Use uvloop for high performance
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 app = FastAPI(title="Async TTS API")
 
